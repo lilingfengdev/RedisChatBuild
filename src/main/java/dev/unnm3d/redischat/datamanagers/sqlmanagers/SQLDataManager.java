@@ -1,6 +1,5 @@
 package dev.unnm3d.redischat.datamanagers.sqlmanagers;
 
-import com.google.common.io.ByteArrayDataInput;
 import com.google.common.io.ByteArrayDataOutput;
 import com.google.common.io.ByteStreams;
 import dev.unnm3d.redischat.RedisChat;
@@ -15,7 +14,6 @@ import org.bukkit.Bukkit;
 import org.bukkit.Material;
 import org.bukkit.Sound;
 import org.bukkit.inventory.ItemStack;
-import org.h2.jdbc.JdbcSQLIntegrityConstraintViolationException;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
@@ -29,12 +27,12 @@ import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
-public abstract class SQLDataManager implements DataManager {
-    protected final RedisChat plugin;
+public abstract class SQLDataManager extends PluginMessageManager implements DataManager {
+
     private final ConcurrentHashMap<String, Map.Entry<Integer, Long>> rateLimit;
 
-    protected SQLDataManager(RedisChat plugin) {
-        this.plugin = plugin;
+    public SQLDataManager(RedisChat plugin) {
+        super(plugin);
         this.rateLimit = new ConcurrentHashMap<>();
     }
 
@@ -45,6 +43,13 @@ public abstract class SQLDataManager implements DataManager {
                 id              double      not null primary key,
                 recipient       varchar(16) default null,
                 serializedMail  text        not null
+            );
+            """, """
+            create table if not exists read_mails
+            (
+                player_name     varchar(16) not null,
+                mail_id         double      not null,
+                primary key (player_name, mail_id)
             );
             """, """
             create table if not exists player_data
@@ -94,48 +99,16 @@ public abstract class SQLDataManager implements DataManager {
                 placeholders   TEXT        not null,
                 primary key (player_name)
             );
+            """, """
+            create table if not exists whitelist_enabled_players
+            (
+                player_name    varchar(16) not null,
+                primary key (player_name)
+            );
             """
         };
     }
 
-    @SuppressWarnings("UnstableApiUsage")
-    protected void listenPluginMessages() {
-        plugin.getServer().getMessenger().registerOutgoingPluginChannel(plugin, "BungeeCord");
-        plugin.getServer().getMessenger().registerIncomingPluginChannel(plugin, "BungeeCord", (channel, player, message) -> {
-            if (!channel.equals("BungeeCord")) return;
-
-            final ByteArrayDataInput in = ByteStreams.newDataInput(message);
-            final String subchannel = in.readUTF();
-            final String messageString = in.readUTF();
-
-            if (subchannel.equals(DataKey.CHAT_CHANNEL.toString())) {
-                if (plugin.config.debug) {
-                    plugin.getLogger().info("R1) Received message from redis: " + System.currentTimeMillis());
-                }
-                plugin.getChannelManager().sendAndKeepLocal(ChatMessageInfo.deserialize(messageString));
-            } else if (subchannel.equals(DataKey.GLOBAL_CHANNEL.withoutCluster())) {
-                if (plugin.config.debug) {
-                    plugin.getLogger().info("R1) Received message from redis: " + System.currentTimeMillis());
-                }
-                plugin.getChannelManager().sendAndKeepLocal(ChatMessageInfo.deserialize(messageString));
-            } else if (subchannel.equals(DataKey.PLAYERLIST.toString())) {
-                if (plugin.getPlayerListManager() != null)
-                    plugin.getPlayerListManager().updatePlayerList(Arrays.asList(messageString.split("§")));
-            } else if (subchannel.equals(DataKey.CHANNEL_UPDATE.toString())) {
-                if (messageString.startsWith("delete§")) {
-                    plugin.getChannelManager().updateChannel(messageString.substring(7), null);
-                } else {
-                    final Channel ch = Channel.deserialize(messageString);
-                    plugin.getChannelManager().updateChannel(ch.getName(), ch);
-                }
-            } else if (subchannel.equals(DataKey.MUTED_UPDATE.toString())) {
-                plugin.getChannelManager().getMuteManager().serializedUpdate(messageString);
-            } else if (subchannel.equals(DataKey.PLAYER_PLACEHOLDERS_UPDATE.toString())) {
-                plugin.getPlaceholderManager().updatePlayerPlaceholders(messageString);
-            }
-
-        });
-    }
 
     protected abstract Connection getConnection() throws SQLException;
 
@@ -188,13 +161,14 @@ public abstract class SQLDataManager implements DataManager {
     @Override
     public boolean isRateLimited(@NotNull String playerName, @NotNull Channel channel) {
         final Map.Entry<Integer, Long> info = this.rateLimit.get(playerName);
-        if (info != null)
-            if (System.currentTimeMillis() - info.getValue() > channel.getRateLimitPeriod() * 1000L) {
+        if (info != null) {
+            long elapsedTime = System.currentTimeMillis() - info.getValue();
+            if (elapsedTime > channel.getRateLimitPeriod() * 1000L) {
                 this.rateLimit.remove(playerName);
                 return false;
-            } else {
-                return true;
             }
+            return info.getKey() >= channel.getRateLimit();
+        }
         return false;
     }
 
@@ -351,7 +325,8 @@ public abstract class SQLDataManager implements DataManager {
                         (`player_name`, `inv_serialized`)
                     VALUES
                         (?,?)
-                    ON DUPLICATE KEY UPDATE `inv_serialized` = VALUES(`inv_serialized`);""")) {
+                    ON DUPLICATE KEY UPDATE `inv_serialized` = VALUES(`inv_serialized`);
+                    """)) {
 
                 statement.setString(1, name);
                 statement.setString(2, serialize(inv));
@@ -413,7 +388,10 @@ public abstract class SQLDataManager implements DataManager {
             try (PreparedStatement statement = connection.prepareStatement("""
                     UPDATE player_data SET inv_serialized = NULL, item_serialized = NULL, ec_serialized = NULL;
                     """)) {
-                statement.executeUpdate();
+
+                if (statement.executeUpdate() == 0) {
+                    throw new SQLException("Failed to clear inv share cache: " + statement);
+                }
             }
         } catch (SQLException e) {
             errWarn("Failed to clear inv share cache", e);
@@ -497,17 +475,22 @@ public abstract class SQLDataManager implements DataManager {
         return CompletableFuture.supplyAsync(() -> {
             try (Connection connection = getConnection()) {
                 try (PreparedStatement statement = connection.prepareStatement("""
-                        select id, serializedMail from mails
-                        where recipient = ?;""")) {
+                        select id, serializedMail, player_name from mails
+                        left join read_mails on mails.id = read_mails.mail_id and read_mails.player_name = ?
+                        where recipient = ?;
+                        """)) {
 
                     statement.setString(1, playerName);
+                    statement.setString(2, playerName);
 
                     final ResultSet resultSet = statement.executeQuery();
-                    List<Mail> mails = new ArrayList<>();
+                    final List<Mail> mails = new ArrayList<>();
                     while (resultSet.next()) {
-                        mails.add(new Mail(
+                        Mail mail = new Mail(plugin.getMailGUIManager(),
                                 resultSet.getDouble("id"),
-                                resultSet.getString("serializedMail")));
+                                resultSet.getString("serializedMail"));
+                        mail.setRead(resultSet.getString("player_name") != null);
+                        mails.add(mail);
                     }
                     return mails;
                 }
@@ -532,10 +515,13 @@ public abstract class SQLDataManager implements DataManager {
                     statement.setDouble(1, mail.getId());
                     statement.setString(2, mail.getReceiver());
                     statement.setString(3, mail.serialize());
+                    sendMailUpdate(mail);
+
                     mail.setCategory(Mail.MailCategory.SENT);
                     statement.setDouble(4, mail.getId() + 0.001);
                     statement.setString(5, mail.getSender());
                     statement.setString(6, mail.serialize());
+
                     if (statement.executeUpdate() == 0) {
                         throw new SQLException("Failed to insert serialized private mail into database: " + statement);
                     }
@@ -561,9 +547,11 @@ public abstract class SQLDataManager implements DataManager {
                     statement.setDouble(1, mail.getId());
                     statement.setString(2, mail.getReceiver());
                     statement.setString(3, mail.serialize());
+
                     if (statement.executeUpdate() == 0) {
                         throw new SQLException("Failed to insert serialized public mail into database: " + statement);
                     }
+                    sendMailUpdate(mail);
                     return true;
                 }
             } catch (SQLException e) {
@@ -574,19 +562,26 @@ public abstract class SQLDataManager implements DataManager {
     }
 
     @Override
-    public CompletionStage<List<Mail>> getPublicMails() {
+    public CompletableFuture<List<Mail>> getPublicMails(@NotNull String playerName) {
         return CompletableFuture.supplyAsync(() -> {
             try (Connection connection = getConnection()) {
                 try (PreparedStatement statement = connection.prepareStatement("""
-                        select id, serializedMail from mails
+                        select id, serializedMail, player_name
+                        from mails 
+                        left join read_mails on mails.id = read_mails.mail_id and read_mails.player_name = ?
                         where recipient = '-Public';""")) {
 
+                    statement.setString(1, playerName);
+
                     final ResultSet resultSet = statement.executeQuery();
-                    List<Mail> mails = new ArrayList<>();
+                    final List<Mail> mails = new ArrayList<>();
                     while (resultSet.next()) {
-                        mails.add(new Mail(
+                        final Mail mail = new Mail(plugin.getMailGUIManager(),
                                 resultSet.getDouble("id"),
-                                resultSet.getString("serializedMail")));
+                                resultSet.getString("serializedMail"));
+
+                        mail.setRead(resultSet.getString("player_name") != null);
+                        mails.add(mail);
                     }
                     return mails;
                 }
@@ -598,8 +593,62 @@ public abstract class SQLDataManager implements DataManager {
     }
 
     @Override
+    public CompletionStage<Boolean> setMailRead(@NotNull String playerName, @NotNull Mail mail) {
+        return CompletableFuture.supplyAsync(() -> {
+            try (Connection connection = getConnection()) {
+                try (PreparedStatement statement = connection.prepareStatement(mail.isRead() ? """
+                        INSERT IGNORE INTO read_mails
+                            (`player_name`, `mail_id`)
+                        VALUES
+                            (?,?);
+                        """ : """
+                        DELETE FROM read_mails
+                        WHERE player_name = ? AND mail_id = ?;
+                        """)) {
+
+                    statement.setString(1, playerName);
+                    statement.setDouble(2, mail.getId());
+                    if (statement.executeUpdate() == 0) {
+                        throw new SQLException("Failed to insert read mail into database: " + statement);
+                    }
+                    return true;
+                }
+            } catch (SQLException e) {
+                errWarn("Failed to insert read mail into database", e);
+            }
+            return false;
+        }, plugin.getExecutorService());
+    }
+
+    @Override
+    public CompletionStage<Boolean> deleteMail(@NotNull Mail mail) {
+        return CompletableFuture.supplyAsync(() -> {
+            try (Connection connection = getConnection()) {
+                try (PreparedStatement deleteMailStatement = connection.prepareStatement(
+                        "DELETE FROM mails WHERE id =?;");
+                     PreparedStatement deleteReadMailStatement = connection.prepareStatement(
+                             "DELETE FROM read_mails WHERE mail_id =?;")) {
+
+                    deleteMailStatement.setDouble(1, mail.getId());
+                    if (deleteMailStatement.executeUpdate() == 0) {
+                        throw new SQLException("Failed to delete mail from database: " + deleteMailStatement);
+                    }
+
+                    deleteReadMailStatement.setDouble(1, mail.getId());
+                    deleteReadMailStatement.executeUpdate();
+
+                    return true;
+                }
+            } catch (SQLException e) {
+                errWarn("Failed to delete mail from database", e);
+            }
+            return false;
+        }, plugin.getExecutorService());
+    }
+
+    @Override
     public void registerChannel(@NotNull Channel channel) {
-        CompletableFuture.supplyAsync(() -> {
+        CompletableFuture.runAsync(() -> {
             try (Connection connection = getConnection()) {
                 try (PreparedStatement statement = connection.prepareStatement("""
                         INSERT INTO channels
@@ -631,41 +680,16 @@ public abstract class SQLDataManager implements DataManager {
 
                     sendChannelUpdate(channel.getName(), channel);
 
-                    return true;
                 }
             } catch (SQLException e) {
-                if (e instanceof JdbcSQLIntegrityConstraintViolationException)
+                if(e.getMessage().contains("Duplicate entry")) {
                     Bukkit.getLogger().warning("Channel " + channel.getName() + "already exists in database");
+                }
                 if (plugin.config.debug) {
                     e.printStackTrace();
                 }
             }
-            return false;
         }, plugin.getExecutorService());
-    }
-
-    private void sendChannelUpdate(String channelName, @Nullable Channel channel) {
-        final ByteArrayDataOutput out = ByteStreams.newDataOutput();
-        out.writeUTF("Forward");
-        out.writeUTF("ALL");
-        out.writeUTF(DataKey.CHANNEL_UPDATE.toString());
-
-        if (channel == null) {
-            out.writeUTF("delete§" + channelName);
-        } else {
-            out.writeUTF(channel.serialize());
-        }
-
-        sendPluginMessage(out.toByteArray());
-    }
-
-    public void sendPlayerPlaceholdersUpdate(String serializedPlaceholders) {
-        final ByteArrayDataOutput out = ByteStreams.newDataOutput();
-        out.writeUTF("Forward");
-        out.writeUTF("ALL");
-        out.writeUTF(DataKey.PLAYER_PLACEHOLDERS_UPDATE.toString());
-        out.writeUTF(serializedPlaceholders);
-        sendPluginMessage(out.toByteArray());
     }
 
     @Override
@@ -674,7 +698,7 @@ public abstract class SQLDataManager implements DataManager {
             try (Connection connection = getConnection()) {
                 try (PreparedStatement statement = connection.prepareStatement("""
                         DELETE FROM channels
-                            where name = ?;""")) {
+                        where name = ?;""")) {
 
                     statement.setString(1, channelName);
                     if (statement.executeUpdate() == 0) {
@@ -715,6 +739,51 @@ public abstract class SQLDataManager implements DataManager {
             return "public";
         }, plugin.getExecutorService());
     }
+
+    @Override
+    public CompletionStage<Set<String>> getWhitelistEnabledPlayers() {
+        return CompletableFuture.supplyAsync(() -> {
+            try (Connection connection = getConnection()) {
+                try (PreparedStatement statement = connection.prepareStatement("""
+                        select player_name from whitelist_enabled_players;""")) {
+
+                    statement.setBoolean(1, true);
+                    final ResultSet resultSet = statement.executeQuery();
+                    final Set<String> players = new HashSet<>();
+                    while (resultSet.next()) {
+                        players.add(resultSet.getString("player_name"));
+                    }
+                    return players;
+                }
+            } catch (SQLException e) {
+                errWarn("Failed to fetch whitelist enabled players from database", e);
+            }
+            return Set.of();
+        }, plugin.getExecutorService());
+    }
+
+    @Override
+    public void setWhitelistEnabledPlayer(@NotNull String playerName, boolean enabled) {
+        CompletableFuture.runAsync(() -> {
+            try (Connection connection = getConnection()) {
+                try (PreparedStatement statement = connection.prepareStatement(enabled ?
+                        "INSERT INTO whitelist_enabled_players (`player_name`) VALUES (?)" :
+                        "DELETE FROM whitelist_enabled_players WHERE player_name = ?;"
+                )) {
+                    statement.setString(1, playerName);
+
+                    if (statement.executeUpdate() == 0) {
+                        throw new SQLException("Failed to update whitelist enabled player to database: " + statement);
+                    }
+                    sendWhitelistEnabledUpdate(playerName, enabled);
+
+                }
+            } catch (SQLException e) {
+                errWarn("Failed to update whitelist enabled player to database", e);
+            }
+        });
+    }
+
 
     @Override
     public CompletionStage<List<PlayerChannel>> getPlayerChannelStatuses(@NotNull String playerName, Map<String, Channel> registeredChannels) {
@@ -785,9 +854,10 @@ public abstract class SQLDataManager implements DataManager {
                         """ +
                         String.join(",", Collections.nCopies(channelStatuses.size(), "(?,?,?)")) +
                         """
-                                                        
+                                                                
                                 ON DUPLICATE KEY UPDATE status = VALUES(`status`);
                                 """)) {
+
                     int i = 0;
                     for (Map.Entry<String, String> stringStringEntry : channelStatuses.entrySet()) {
                         statement.setString(i * 3 + 1, playerName);
@@ -828,16 +898,6 @@ public abstract class SQLDataManager implements DataManager {
         }, plugin.getExecutorService());
     }
 
-    private void errWarn(String msg, Exception exception) {
-        if (plugin.config.debug) {
-            exception.printStackTrace();
-            return;
-        }
-        plugin.getServer().getLogger().warning(msg);
-    }
-
-
-    @SuppressWarnings("UnstableApiUsage")
     @Override
     public void sendChatMessage(@NotNull ChatMessageInfo packet) {
         String publishChannel = DataKey.CHAT_CHANNEL.toString();
@@ -847,28 +907,15 @@ public abstract class SQLDataManager implements DataManager {
             if (chName.equals(KnownChatEntities.STAFFCHAT_CHANNEL_NAME.toString()))
                 publishChannel = DataKey.GLOBAL_CHANNEL.withoutCluster();//Exception for staffchat: it's a global channel
 
-            final Map.Entry<Integer, Long> info = this.rateLimit.get(packet.getSender().getName());
-            if (info != null) {
-                this.rateLimit.put(packet.getSender().getName(), new AbstractMap.SimpleEntry<>(info.getKey() + 1, System.currentTimeMillis()));
-            } else {
+            if (this.rateLimit.computeIfPresent(packet.getSender().getName(), (key, value) ->
+                    new AbstractMap.SimpleEntry<>(value.getKey() + 1, System.currentTimeMillis())) == null) {
+                //If the map doesn't contain the player, we add it
                 this.rateLimit.put(packet.getSender().getName(), new AbstractMap.SimpleEntry<>(1, System.currentTimeMillis()));
             }
         }
 
-        final ByteArrayDataOutput out = ByteStreams.newDataOutput();
-        out.writeUTF("Forward");
-        out.writeUTF("ALL");
-        out.writeUTF(publishChannel);
-        out.writeUTF(packet.serialize());
-
-        sendPluginMessage(out.toByteArray());
+        sendChatPluginMessage(publishChannel, packet);
         plugin.getChannelManager().sendAndKeepLocal(packet);
-    }
-
-    private void sendPluginMessage(byte[] byteArray) {
-        if (plugin.getServer().getOnlinePlayers().isEmpty()) return;
-        plugin.getServer().getOnlinePlayers().iterator().next()
-                .sendPluginMessage(plugin, "BungeeCord", byteArray);
     }
 
     @SuppressWarnings("UnstableApiUsage")
@@ -886,14 +933,12 @@ public abstract class SQLDataManager implements DataManager {
             plugin.getPlayerListManager().updatePlayerList(playerNames);
     }
 
-    public void sendMutedEntityUpdate(@NotNull String entityKey, @NotNull Set<String> entitiesValue) {
-        final ByteArrayDataOutput out = ByteStreams.newDataOutput();
-        out.writeUTF("Forward");
-        out.writeUTF("ALL");
-        out.writeUTF(DataKey.MUTED_UPDATE.toString());
-        out.writeUTF(entityKey + ";" + String.join(",", entitiesValue));
-
-        sendPluginMessage(out.toByteArray());
+    protected void errWarn(String msg, Exception exception) {
+        if (plugin.config.debug) {
+            exception.printStackTrace();
+            return;
+        }
+        plugin.getServer().getLogger().warning(msg);
     }
 
     @Override

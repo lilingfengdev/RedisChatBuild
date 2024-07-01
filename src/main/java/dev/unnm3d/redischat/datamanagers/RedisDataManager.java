@@ -2,6 +2,7 @@ package dev.unnm3d.redischat.datamanagers;
 
 import dev.unnm3d.redischat.RedisChat;
 import dev.unnm3d.redischat.api.DataManager;
+import dev.unnm3d.redischat.api.RedisChatAPI;
 import dev.unnm3d.redischat.channels.Channel;
 import dev.unnm3d.redischat.channels.PlayerChannel;
 import dev.unnm3d.redischat.chat.ChatMessageInfo;
@@ -10,8 +11,6 @@ import dev.unnm3d.redischat.datamanagers.redistools.RedisAbstract;
 import dev.unnm3d.redischat.mail.Mail;
 import io.lettuce.core.RedisClient;
 import io.lettuce.core.RedisURI;
-import io.lettuce.core.pubsub.RedisPubSubListener;
-import io.lettuce.core.pubsub.StatefulRedisPubSubConnection;
 import org.bukkit.Material;
 import org.bukkit.inventory.ItemStack;
 import org.jetbrains.annotations.NotNull;
@@ -19,10 +18,7 @@ import org.jetbrains.annotations.Nullable;
 
 import java.time.Duration;
 import java.util.*;
-import java.util.concurrent.CompletionStage;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
+import java.util.concurrent.*;
 import java.util.stream.Collectors;
 
 
@@ -33,7 +29,15 @@ public class RedisDataManager extends RedisAbstract implements DataManager {
     public RedisDataManager(RedisClient redisClient, RedisChat redisChat) {
         super(redisClient, redisChat.config.redis.poolSize() <= 0 ? 1 : redisChat.config.redis.poolSize());
         this.plugin = redisChat;
-        listenSub();
+        registerSub(DataKey.CHAT_CHANNEL.toString(),
+                DataKey.GLOBAL_CHANNEL.withoutCluster(),
+                DataKey.PLAYERLIST.toString(),
+                DataKey.REJOIN_CHANNEL.toString(),
+                DataKey.CHANNEL_UPDATE.toString(),
+                DataKey.MUTED_UPDATE.toString(),
+                DataKey.PLAYER_PLACEHOLDERS.toString(),
+                DataKey.WHITELIST_ENABLED_UPDATE.toString(),
+                DataKey.MAIL_UPDATE_CHANNEL.toString());
     }
 
     public static RedisDataManager startup(RedisChat redisChat) {
@@ -54,81 +58,49 @@ public class RedisDataManager extends RedisAbstract implements DataManager {
         return new RedisDataManager(RedisClient.create(redisURIBuilder.build()), redisChat);
     }
 
-    private void listenSub() {
-        StatefulRedisPubSubConnection<String, String> pubSubConnection = getPubSubConnection();
-        pubSubConnection.addListener(new RedisPubSubListener<>() {
-            @Override
-            public void message(String channel, String message) {
+    @Override
+    public void receiveMessage(String channel, String message) {
+        if (channel.equals(DataKey.CHAT_CHANNEL.toString())) {
+            if (plugin.config.debug) {
+                plugin.getLogger().info("R1) Received message from redis: " + System.currentTimeMillis());
+            }
+            plugin.getChannelManager().sendAndKeepLocal(ChatMessageInfo.deserialize(message));
 
-                if (channel.equals(DataKey.CHAT_CHANNEL.toString())) {
-                    if (plugin.config.debug) {
-                        plugin.getLogger().info("R1) Received message from redis: " + System.currentTimeMillis());
-                    }
-                    plugin.getChannelManager().sendAndKeepLocal(ChatMessageInfo.deserialize(message));
+        } else if (channel.equals(DataKey.GLOBAL_CHANNEL.withoutCluster())) {
+            if (plugin.config.debug) {
+                plugin.getLogger().info("R1) Received message from redis: " + System.currentTimeMillis());
+            }
+            plugin.getChannelManager().sendAndKeepLocal(ChatMessageInfo.deserialize(message));
 
-                } else if (channel.equals(DataKey.GLOBAL_CHANNEL.withoutCluster())) {
-                    if (plugin.config.debug) {
-                        plugin.getLogger().info("R1) Received message from redis: " + System.currentTimeMillis());
-                    }
-                    plugin.getChannelManager().sendAndKeepLocal(ChatMessageInfo.deserialize(message));
+        } else if (channel.equals(DataKey.PLAYERLIST.toString())) {
+            if (plugin.getPlayerListManager() != null)
+                plugin.getPlayerListManager().updatePlayerList(Arrays.asList(message.split("§")));
 
-                } else if (channel.equals(DataKey.PLAYERLIST.toString())) {
-                    if (plugin.getPlayerListManager() != null)
-                        plugin.getPlayerListManager().updatePlayerList(Arrays.asList(message.split("§")));
+        } else if (channel.equals(DataKey.REJOIN_CHANNEL.toString())) {
+            if (plugin.getJoinQuitManager() != null)
+                plugin.getJoinQuitManager().rejoinRequest(message);
 
-                } else if (channel.equals(DataKey.REJOIN_CHANNEL.toString())) {
-                    if (plugin.getJoinQuitManager() != null)
-                        plugin.getJoinQuitManager().rejoinRequest(message);
-
-                } else if (channel.equals(DataKey.CHANNEL_UPDATE.toString())) {
-                    if (message.startsWith("delete§")) {
-                        plugin.getChannelManager().updateChannel(message.substring(7), null);
-                    } else {
-                        Channel ch = Channel.deserialize(message);
-                        plugin.getChannelManager().updateChannel(ch.getName(), ch);
-                    }
-
-                } else if (channel.equals(DataKey.MUTED_UPDATE.toString())) {
-                    plugin.getChannelManager().getMuteManager().serializedUpdate(message);
-                } else if (channel.equals(DataKey.PLAYER_PLACEHOLDERS.toString())) {
-                    plugin.getPlaceholderManager().updatePlayerPlaceholders(message);
-                }
+        } else if (channel.equals(DataKey.CHANNEL_UPDATE.toString())) {
+            if (message.startsWith("delete§")) {
+                plugin.getChannelManager().updateChannel(message.substring(7), null);
+            } else {
+                Channel ch = Channel.deserialize(message);
+                plugin.getChannelManager().updateChannel(ch.getName(), ch);
             }
 
-            @Override
-            public void message(String pattern, String channel, String message) {
+        } else if (channel.equals(DataKey.MAIL_UPDATE_CHANNEL.toString())) {
+            plugin.getMailGUIManager().receiveMailUpdate(message);
+        } else if (channel.equals(DataKey.MUTED_UPDATE.toString())) {
+            plugin.getChannelManager().getMuteManager().serializedUpdate(message);
+        } else if (channel.equals(DataKey.PLAYER_PLACEHOLDERS.toString())) {
+            plugin.getPlaceholderManager().updatePlayerPlaceholders(message);
+        } else if (channel.equals(DataKey.WHITELIST_ENABLED_UPDATE.toString())) {
+            if (message.startsWith("D§")) {
+                plugin.getChannelManager().getMuteManager().whitelistEnabledUpdate(message.substring(2), false);
+            } else {
+                plugin.getChannelManager().getMuteManager().whitelistEnabledUpdate(message, true);
             }
-
-            @Override
-            public void subscribed(String channel, long count) {
-            }
-
-            @Override
-            public void psubscribed(String pattern, long count) {
-            }
-
-            @Override
-            public void unsubscribed(String channel, long count) {
-            }
-
-            @Override
-            public void punsubscribed(String pattern, long count) {
-            }
-        });
-        pubSubConnection.async().subscribe(
-                        DataKey.CHAT_CHANNEL.toString(),
-                        DataKey.GLOBAL_CHANNEL.withoutCluster(),
-                        DataKey.PLAYERLIST.toString(),
-                        DataKey.REJOIN_CHANNEL.toString(),
-                        DataKey.CHANNEL_UPDATE.toString(),
-                        DataKey.MUTED_UPDATE.toString(),
-                        DataKey.PLAYER_PLACEHOLDERS.toString())
-                .exceptionally(throwable -> {
-                    throwable.printStackTrace();
-                    plugin.getLogger().warning("Error subscribing to chat channel");
-                    return null;
-                })
-                .thenAccept(subscription -> plugin.getLogger().info("Subscribed to channel: " + DataKey.CHAT_CHANNEL));
+        }
     }
 
     @Override
@@ -378,19 +350,24 @@ public class RedisDataManager extends RedisAbstract implements DataManager {
 
     @Override
     public CompletionStage<List<Mail>> getPlayerPrivateMail(@NotNull String playerName) {
-        return getConnectionAsync(connection ->
-                connection.hgetall(DataKey.PRIVATE_MAIL_PREFIX + playerName)
-                        .thenApply(this::deserializeMails)
-                        .exceptionally(throwable -> {
-                            throwable.printStackTrace();
-                            plugin.getLogger().warning("Error getting private mails");
-                            return null;
-                        }));
+        return CompletableFuture.supplyAsync(() -> executeTransaction(commands -> {
+                    commands.hgetall(DataKey.PRIVATE_MAIL_PREFIX + playerName);
+                    commands.smembers(DataKey.READ_MAIL_MAP + playerName);
+                }).map(result -> {
+                    final List<Mail> mails = deserializeMails((Map<String, String>) result.get(0));
+                    final Set<Double> readMailIds = ((Set<String>) result.get(1)).stream()
+                            .map(Double::parseDouble)
+                            .collect(Collectors.toSet());
+                    mails.forEach(mail -> mail.setRead(readMailIds.contains(mail.getId())));
+                    return mails;
+                }).orElse(List.of()),
+                plugin.getExecutorService());
     }
 
     @Override
     public CompletionStage<Boolean> setPlayerPrivateMail(@NotNull Mail mail) {
         return getConnectionPipeline(connection -> {
+            connection.publish(DataKey.MAIL_UPDATE_CHANNEL.toString(), mail.serializeWithId());
             connection.hset(DataKey.PRIVATE_MAIL_PREFIX + mail.getReceiver(), String.valueOf(mail.getId()), mail.serialize());
             mail.setCategory(Mail.MailCategory.SENT);
             return connection.hset(DataKey.PRIVATE_MAIL_PREFIX + mail.getSender(), String.valueOf(mail.getId()), mail.serialize()).exceptionally(throwable -> {
@@ -407,23 +384,60 @@ public class RedisDataManager extends RedisAbstract implements DataManager {
 
     @Override
     public CompletionStage<Boolean> setPublicMail(@NotNull Mail mail) {
-        return getConnectionAsync(connection ->
-                connection.hset(DataKey.PUBLIC_MAIL.toString(), String.valueOf(mail.getId()), mail.serialize()).exceptionally(throwable -> {
-                    throwable.printStackTrace();
-                    plugin.getLogger().warning("Error setting public mail");
-                    return null;
-                }));
+        return getConnectionPipeline(connection -> {
+            connection.publish(DataKey.MAIL_UPDATE_CHANNEL.toString(), mail.serializeWithId());
+            return connection.hset(DataKey.PUBLIC_MAIL.toString(), String.valueOf(mail.getId()), mail.serialize()).exceptionally(throwable -> {
+                throwable.printStackTrace();
+                plugin.getLogger().warning("Error setting public mail");
+                return null;
+            });
+        });
     }
 
     @Override
-    public CompletionStage<List<Mail>> getPublicMails() {
-        return getConnectionAsync(connection ->
-                connection.hgetall(DataKey.PUBLIC_MAIL.toString())
-                        .thenApply(this::deserializeMails).exceptionally(throwable -> {
-                            throwable.printStackTrace();
-                            plugin.getLogger().warning("Error getting public mails");
-                            return null;
-                        }));
+    public CompletableFuture<List<Mail>> getPublicMails(@NotNull String playerName) {
+        return CompletableFuture.supplyAsync(() -> executeTransaction(commands -> {
+                    commands.hgetall(DataKey.PUBLIC_MAIL.toString());
+                    commands.smembers(DataKey.READ_MAIL_MAP + playerName);
+                }).map(result -> {
+                    final List<Mail> mails = deserializeMails((Map<String, String>) result.get(0));
+                    final Set<Double> readMailIds = ((Set<String>) result.get(1)).stream()
+                            .map(Double::parseDouble)
+                            .collect(Collectors.toSet());
+                    mails.forEach(mail -> mail.setRead(readMailIds.contains(mail.getId())));
+                    return mails;
+                }).orElse(List.of()),
+                plugin.getExecutorService());
+    }
+
+    @Override
+    public CompletionStage<Boolean> setMailRead(@NotNull String playerName, @NotNull Mail mail) {
+        return getConnectionAsync(connection -> mail.isRead() ? connection.sadd(DataKey.READ_MAIL_MAP + playerName, String.valueOf(mail.getId()))
+                .exceptionally(throwable -> {
+                    throwable.printStackTrace();
+                    plugin.getLogger().warning("Error setting mail read");
+                    return -1L;
+                }) : connection.srem(DataKey.READ_MAIL_MAP + playerName, String.valueOf(mail.getId()))
+                .exceptionally(throwable -> {
+                    throwable.printStackTrace();
+                    plugin.getLogger().warning("Error setting mail read");
+                    return -1L;
+                })).thenApply(aLong -> aLong > 0);
+    }
+
+    @Override
+    public CompletionStage<Boolean> deleteMail(@NotNull Mail mail) {
+        return getConnectionPipeline(connection -> switch (mail.getCategory()) {
+            case PUBLIC -> connection.hdel(DataKey.PUBLIC_MAIL.toString(), String.valueOf(mail.getId()));
+            case SENT -> connection.hdel(DataKey.PRIVATE_MAIL_PREFIX + mail.getSender(), String.valueOf(mail.getId()));
+            case PRIVATE ->
+                    connection.hdel(DataKey.PRIVATE_MAIL_PREFIX + mail.getReceiver(), String.valueOf(mail.getId()));
+        }).thenApply(aLong -> aLong > 0)
+                .exceptionally(throwable -> {
+                    throwable.printStackTrace();
+                    plugin.getLogger().warning("Error deleting mail");
+                    return false;
+                });
     }
 
     @Override
@@ -560,6 +574,44 @@ public class RedisDataManager extends RedisAbstract implements DataManager {
     }
 
     @Override
+    public CompletionStage<Set<String>> getWhitelistEnabledPlayers() {
+        return getConnectionAsync(connection ->
+                connection.smembers(DataKey.WHITELIST_ENABLED_PLAYERS.toString())
+                        .thenApply(serializedSet -> {
+                            if (serializedSet == null) return new HashSet<String>();
+                            return serializedSet;
+                        })
+                        .exceptionally(throwable -> {
+                            throwable.printStackTrace();
+                            plugin.getLogger().warning("Error getting whitelist enabled players");
+                            return null;
+                        }));
+    }
+
+    @Override
+    public void setWhitelistEnabledPlayer(@NotNull String playerName, boolean enabled) {
+        getConnectionAsync(connection -> {
+            if (enabled) {
+                connection.sadd(DataKey.WHITELIST_ENABLED_PLAYERS.toString(), playerName)
+                        .exceptionally(throwable -> {
+                            throwable.printStackTrace();
+                            plugin.getLogger().warning("Error setting whitelist enabled player");
+                            return null;
+                        });
+                return connection.publish(DataKey.WHITELIST_ENABLED_UPDATE.toString(), playerName);
+            }
+            connection.srem(DataKey.WHITELIST_ENABLED_PLAYERS.toString(), playerName)
+                    .exceptionally(throwable -> {
+                        throwable.printStackTrace();
+                        plugin.getLogger().warning("Error setting whitelist enabled player");
+                        return null;
+                    });
+            return connection.publish(DataKey.WHITELIST_ENABLED_UPDATE.toString(), "D§" + playerName);
+
+        });
+    }
+
+    @Override
     public void sendChatMessage(@NotNull ChatMessageInfo packet) {
         getConnectionPipeline(conn -> {
             String publishChannel = DataKey.CHAT_CHANNEL.toString();
@@ -636,6 +688,23 @@ public class RedisDataManager extends RedisAbstract implements DataManager {
     @Override
     public void close() {
         super.close();
+    }
+
+    private List<Mail> deserializeMails(Map<String, String> timestampMail) {
+        return Optional.ofNullable(RedisChatAPI.getAPI())
+                .map(RedisChatAPI::getMailManager)
+                .filter(Optional::isPresent)
+                .map(Optional::get)
+                .map(mailGUIManager -> timestampMail.entrySet().stream()
+                        // From string to Mail and sort by timestamp
+                        .map(entry -> new AbstractMap.SimpleEntry<>(Double.parseDouble(entry.getKey()), entry.getValue()))
+                        .sorted(Map.Entry.comparingByKey(
+                                Comparator.reverseOrder()
+                        ))
+                        .map(entry -> new Mail(mailGUIManager, entry.getKey(), entry.getValue()))
+                        .toList())
+                .orElse(new ArrayList<>());
+
     }
 
 }

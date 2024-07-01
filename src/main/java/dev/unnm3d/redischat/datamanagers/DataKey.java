@@ -8,6 +8,7 @@ public enum DataKey {
     CHANNEL_UPDATE("rchat:ch_update"),
     REJOIN_CHANNEL("rchat:rejoin"),
     PLAYERLIST("rchat:playerlist"),
+    MAIL_UPDATE_CHANNEL("rchat:mail_update"),
     PLAYER_ACTIVE_CHANNELS("rchat:pactch"),
     CHANNELS("rchat:ch"),
     PLAYER_CHANNELS_PREFIX("rchat:pch_"),
@@ -17,7 +18,6 @@ public enum DataKey {
     RATE_LIMIT_PREFIX("rchat:ratelimit_"),
     REPLY("rchat:reply"),
     PLAYER_PLACEHOLDERS("rchat:p_ph"),
-    PLAYER_PLACEHOLDERS_UPDATE("rchat:p_ph_update"),
     INVSHARE_ITEM("rchat:item"),
     INVSHARE_INVENTORY("rchat:inventory"),
     INVSHARE_ENDERCHEST("rchat:enderchest"),
@@ -25,6 +25,9 @@ public enum DataKey {
     PRIVATE_MAIL_PREFIX("rmail:"),
     PUBLIC_MAIL("rmail:public"),
     MUTED_UPDATE("rchat:m_update"),
+    WHITELIST_ENABLED_PLAYERS("rchat:wl_enabled"),
+    WHITELIST_ENABLED_UPDATE("rchat:wl_enabled_update"),
+    READ_MAIL_MAP("rchat:read_mails:"),
     ;
 
     private final String keyName;

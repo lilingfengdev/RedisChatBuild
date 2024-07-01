@@ -8,6 +8,7 @@ import org.bukkit.command.CommandSender;
 import org.jetbrains.annotations.Nullable;
 
 import java.lang.reflect.Field;
+import java.util.List;
 
 @Configuration
 public final class Messages implements ConfigValidator {
@@ -26,19 +27,50 @@ public final class Messages implements ConfigValidator {
     public String ignoring_list = "<yellow>RedisChat</yellow> <gray>»</gray> <aqua>Ignored players:</aqua><br><green>%list%</green>";
     public String ignoring_player = "<yellow>RedisChat</yellow> <gray>»</gray> <green>Ignoring %player%</green>";
     public String not_ignoring_player = "<yellow>RedisChat</yellow> <gray>»</gray> <green>Ignore removed for %player%</green>";
+    public String ignore_whitelist_enabled = "<yellow>RedisChat</yellow> <gray>»</gray> <red>You are now ignoring only players OUTSIDE your ignore list!!!</red><br>" +
+            "<yellow>RedisChat</yellow> <gray>»</gray> <red>Use <click:run_command:'/allowmsg list'><color:#33c5ff>[/allowmsg list]</color></click> to see the list of players that can send you private messages</red>";
+    public String ignore_whitelist_disabled = "<yellow>RedisChat</yellow> <gray>»</gray> <green>You are now ignoring only players INSIDE your ignore list</green><br>" +
+            "<yellow>RedisChat</yellow> <gray>»</gray> <green>Use <click:run_command:'/ignore list'><color:#ff8c00>[/ignore list]</color></click> to see the list of players that you are ignoring</green>";
     public String spychat_format = "<yellow>RedisChat</yellow> <gray>»</gray> <red>%sender% said to %receiver% : %message%</red>";
     public String spychat_enabled = "<yellow>RedisChat</yellow> <gray>»</gray> <green>Spychat enabled for %player%</green>";
     public String spychat_disabled = "<yellow>RedisChat</yellow> <gray>»</gray> <red>Spychat disabled for %player%</red>";
-    public String editMessageError = "<yellow>RedisChat</yellow> <gray>»</gray> <red>This config entry is not a String or doesn't exist!";
+    public String edit_message_error = "<yellow>RedisChat</yellow> <gray>»</gray> <red>This config entry is not a String or doesn't exist!";
     @Comment("%url% is the url of the WebUI, %field% is the config field to edit")
-    public String editMessageClickHere = "<yellow>RedisChat</yellow> <gray>»</gray> <click:open_url:%url%>Click here to edit the message %field%!</click>";
+    public String edit_message_click_here = "<yellow>RedisChat</yellow> <gray>»</gray> <click:open_url:%url%>Click here to edit the message %field%!</click>";
     @Comment("%field% is the field edited")
-    public String editMessageSuccess = "<yellow>RedisChat</yellow> <gray>»</gray> <green>Saved successfully %field%!";
+    public String edit_message_field = "<yellow>RedisChat</yellow> <gray>»</gray> <green>Saved successfully %field%!";
     public String mailEditorStart = "<yellow>RedisChat</yellow> <gray>»</gray> <click:open_url:%link%><blue>Click here to start the mail editor!</blue></click>";
     public String mailEditorConfirm = "<yellow>RedisChat</yellow> <gray>»</gray> Valid mail. What would you do?<br><click:run_command:/rmail webui %token% confirm>[<green>Confirm, send!</green>]</click>  <click:run_command:/rmail webui %token% preview>[<aqua>Preview</aqua>]</click>  <click:run_command:/rmail webui %token% abort>[<red>Dismiss</red>]</click>";
-    public String mailError = "<yellow>RedisChat</yellow> <gray>»</gray> <red>You do not have any pending mail!</red>";
     public String mailEditorSent = "<yellow>RedisChat</yellow> <gray>»</gray> <green>Mail sent!</green>";
-    public String mailEditorAbort = "<yellow>RedisChat</yellow> <gray>»</gray> <red>Mail aborted!</red>";
+    public String mailEditorFailed = "<yellow>RedisChat</yellow> <gray>»</gray> <red>Mail failed to send!</red>";
+    public String mailError = "<yellow>RedisChat</yellow> <gray>»</gray> <red>An error occurred while modifying the mail!</red>";
+    public String mailDeleted = "<yellow>RedisChat</yellow> <gray>»</gray> <green>Mail %title% deleted successfully!</green>";
+    public String mailNotFound = "<yellow>RedisChat</yellow> <gray>»</gray> <red>Mail not found!</red>";
+    public String mailUnRead = "<yellow>RedisChat</yellow> <gray>»</gray> <red>Mail %title% marked as unread!</red>";
+    public String mailReceived = "<yellow>RedisChat</yellow> <gray>»</gray> <aqua>You got mail from %sender%! Object: %title%</aqua>";
+    public String privateMailHeader =
+            """
+            <dark_gray>Sender: %sender%
+            Object:
+            %title%
+            Date:
+            %timestamp%</dark_gray>
+            <hover:show_text:'Reply to the sender'><click:run_command:'/rmail send %sender% Re: %title%'><green>[Reply]</green></click></hover> <hover:show_text:'Delete the mail from private mail section'><click:run_command:'/rmail delete %mail_id%'><red>[Delete]</red></click></hover> <hover:show_text:'Mark the mail as unread'><click:run_command:'/rmail unread %mail_id% private'><dark_aqua>[Unread]</dark_aqua></click></hover>
+            <dark_gray><st>-------------------</st>
+            """;
+    public String publicMailHeader =
+            """
+            <dark_gray>Object:
+            %title%
+            <hover:show_text:'Mark the mail as unread'><click:run_command:'/rmail unread %mail_id% public'><dark_aqua>[Unread]</dark_aqua></click></hover>
+            <color:dark_gray><st>-------------------</st>
+            """;
+    public String mailItemDisplayName="<yellow>%title%";
+    public List<String> mailItemLore= List.of(
+            "<dark_aqua>Sender: %sender%",
+            "<aqua>Date: %timestamp%",
+            "<dark_gray>%content%"
+    );
     public String noConsole = "<yellow>RedisChat</yellow> <gray>»</gray> <red>You cannot execute this command from console</red>";
     public String itemSet = "<yellow>RedisChat</yellow> <gray>»</gray> <green>Item set!</green>";
     public String noPermission = "<yellow>RedisChat</yellow> <gray>»</gray> <red>You do not have permission to execute this command</red>";
@@ -51,7 +83,9 @@ public final class Messages implements ConfigValidator {
     public String channelListReceiving = "<yellow>%channel% <gray>Status: Receiving";
     public String channelForceListen = "<yellow>RedisChat</yellow> <gray>»</gray> <green>You forced %player% to talk inside %channel%!</green>";
     public String channelDisabled = "<yellow>RedisChat</yellow> <gray>»</gray> <red>Channel %channel% disabled for %player%!</red>";
+    public String messageContainsBadWords = "<yellow>RedisChat</yellow> <gray>»</gray> <red>Your message contains bad words!</red>";
     public String channelNotFound = "<red>Channel not found!</red>";
+    public String channelNoPermission = "<red>You muted this channel or you don't have permission to talk! Check your /channels GUI</red>";
     public String channelMuted = "<yellow>RedisChat</yellow> <gray>»</gray> <aqua>You silenced the %channel% channel!</aqua>";
     public String channelUnmuted = "<yellow>RedisChat</yellow> <gray>»</gray> <aqua>You unmuted the %channel% channel!</aqua>";
     @Comment("The text after the /msg command (example: /msg <player> <message> will be -> /msg <user> <message>")
@@ -60,10 +94,6 @@ public final class Messages implements ConfigValidator {
     public String msgMessageSuggestion = "message";
     @Comment("The text after the /r command (example: /r <message> will be -> /r <text>")
     public String replySuggestion = "message";
-    @Comment("The string for title in command suggestion (example: <title> will be -> <supertitle>")
-    public String mailTitleSuggestion = "title";
-    @Comment("The text after the /mail command (example: /mail send <player> will be -> /mail send <user>")
-    public String mailStringPlayer = "player";
     @Comment("The text after the /staffchat command (example: /staffchat <message> will be -> /staffchat <text>")
     public String staffChatSuggestion = "message";
     public String muted_player = "<yellow>RedisChat</yellow> <gray>»</gray> <aqua>You muted %player% on channel %channel%!</aqua>";

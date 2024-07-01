@@ -6,17 +6,14 @@ import dev.unnm3d.redischat.api.TagResolverIntegration;
 import lombok.AllArgsConstructor;
 import lombok.Getter;
 import me.clip.placeholderapi.PlaceholderAPI;
-import net.kyori.adventure.inventory.Book;
-import net.kyori.adventure.platform.bukkit.BukkitAudiences;
-import net.kyori.adventure.platform.bukkit.BukkitComponentSerializer;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.minimessage.MiniMessage;
 import net.kyori.adventure.text.minimessage.tag.resolver.Placeholder;
 import net.kyori.adventure.text.minimessage.tag.resolver.TagResolver;
 import net.kyori.adventure.text.minimessage.tag.standard.StandardTags;
+import net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer;
 import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
 import org.bukkit.Bukkit;
-import org.bukkit.ChatColor;
 import org.bukkit.OfflinePlayer;
 import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
@@ -41,11 +38,9 @@ public class ComponentProvider {
     private final Map<Player, List<Component>> cacheBlocked;
     private final List<TagResolverIntegration> tagResolverIntegrationList;
 
-    private final BukkitAudiences bukkitAudiences;
 
     public ComponentProvider(RedisChat plugin) {
         this.plugin = plugin;
-        this.bukkitAudiences = BukkitAudiences.create(plugin);
         this.miniMessage = MiniMessage.miniMessage();
         this.cacheBlocked = Collections.synchronizedMap(new WeakHashMap<>());
         this.standardTagResolver = StandardTags.defaults();
@@ -114,10 +109,12 @@ public class ComponentProvider {
     }
 
     public String replaceAmpersandCodesWithSection(String text) {
-        char[] b = text.toCharArray();
+        final char[] b = text.toCharArray();
         for (int i = 0; i < b.length - 1; i++) {
-            if (b[i] == '&' && "0123456789AaBbCcDdEeFfKkLlMmNnOoRrXx#".indexOf(b[i + 1]) > -1) {
-                b[i] = ChatColor.COLOR_CHAR;
+            //If the character is an ampersand replace it with a section symbol
+            //In case of a color code, put it lower case for more compatibility with MiniMessage Legacy Serializer
+            if (b[i] == '§' || (b[i] == '&' && "0123456789AaBbCcDdEeFfKkLlMmNnOoRrXx#".indexOf(b[i + 1]) > -1)) {
+                b[i] = '§';
                 b[i + 1] = Character.toLowerCase(b[i + 1]);
             }
         }
@@ -139,33 +136,45 @@ public class ComponentProvider {
         // we need to split the text by % and then check if the placeholder is a placeholder or not
         for (int i = 0; i < stringPlaceholders.length; i++) {
             if (i % 2 == placeholderStep) {
-                final String reformattedPlaceholder = "%" + stringPlaceholders[i] + "%";
+                final String placeholderStringToBeReplaced = "%" + stringPlaceholders[i] + "%";
                 final String parsedPlaceH = replaceAmpersandCodesWithSection(
                         cmdSender instanceof OfflinePlayer offlinePlayer
-                                ? PlaceholderAPI.setPlaceholders(offlinePlayer, reformattedPlaceholder)
-                                : PlaceholderAPI.setPlaceholders(null, reformattedPlaceholder)
+                                ? PlaceholderAPI.setPlaceholders(offlinePlayer, placeholderStringToBeReplaced)
+                                : PlaceholderAPI.setPlaceholders(null, placeholderStringToBeReplaced)
                 );
-                if (parsedPlaceH.equals(reformattedPlaceholder)) {
+
+                //If the placeholder is not a valid placeholder skip to the next "%"
+                if (parsedPlaceH.equals(placeholderStringToBeReplaced)) {
                     placeholderStep = Math.abs(placeholderStep - 1);
                     continue;
                 }
 
-                if (plugin.config.enablePlaceholderGlitch) {
-                    text = text.replace(reformattedPlaceholder, miniMessage.serialize(
-                            BukkitComponentSerializer.legacy().deserialize(parsedPlaceH)));
-                } else if (parsedPlaceH.contains("§")) {
+                boolean containsMiniMessageTags = MiniMessage.miniMessage().stripTags(parsedPlaceH).length()
+                        != parsedPlaceH.length();
+                boolean hasLegacyColors = parsedPlaceH.contains("§");
+
+                //The objective is to glitch the color only if the color is a legacy color code
+                //(by default is glitched since the beginning of Minecraft)
+                if (plugin.config.enablePlaceholderGlitch && !containsMiniMessageTags) {
+                    text = text.replace(placeholderStringToBeReplaced, miniMessage.serialize(
+                            //Translate legacy color codes to MiniMessage
+                            LegacyComponentSerializer.legacySection().deserialize(parsedPlaceH)
+                    ));
+                } else if (hasLegacyColors) {
                     //Colored placeholder needs to be pasted after the normal text is parsed
-                    placeholders.put(reformattedPlaceholder, BukkitComponentSerializer.legacy().deserialize(parsedPlaceH));
+                    placeholders.put(placeholderStringToBeReplaced, LegacyComponentSerializer.legacySection().deserialize(parsedPlaceH));
                 } else {
-                    text = text.replace(reformattedPlaceholder, parsedPlaceH);
+                    text = text.replace(placeholderStringToBeReplaced, parsedPlaceH);
                 }
             }
         }
 
         Component answer = miniMessage.deserialize(text, tagResolvers);
         for (String placeholder : placeholders.keySet()) {
-            answer = answer.replaceText(rBuilder -> rBuilder.matchLiteral(placeholder)
-                    .replacement(placeholders.get(placeholder)));
+            answer = answer.replaceText(rBuilder -> rBuilder
+                    .matchLiteral(placeholder)//Replace string with components (only if enablePlaceholderGlitch is false)
+                    .replacement(placeholders.get(placeholder))
+            );
         }
         return answer;
     }
@@ -221,25 +230,13 @@ public class ComponentProvider {
                         if (p.getInventory().getItemInMainHand().getItemMeta().hasDisplayName()) {
                             toParseItemComponent = toParseItemComponent.replaceText(rTextBuilder ->
                                     rTextBuilder.matchLiteral("%item_name%")
-                                            .replacement(
-                                                    parse(player,
-                                                            parseLegacy(p.getInventory().getItemInMainHand().getItemMeta().getDisplayName(), false),
-                                                            false,
-                                                            false,
-                                                            false,
-                                                            this.standardTagResolver))
+                                            .replacement(p.getInventory().getItemInMainHand().getItemMeta().displayName())
                             );
                         } else {
                             toParseItemComponent = toParseItemComponent.replaceText(rTextBuilder ->
                                     rTextBuilder.matchLiteral("%item_name%")
-                                            .replacement(
-                                                    parse(player,
-                                                            p.getInventory().getItemInMainHand().getType().name().toLowerCase().replace("_", " "),
-                                                            false,
-                                                            false,
-                                                            false,
-                                                            this.standardTagResolver))
-                            );
+                                            .replacement(Component.translatable(
+                                                    p.getInventory().getItemInMainHand().getType().translationKey())));
                         }
                 } else {
                     toParseItemComponent = toParseItemComponent.replaceText(rTextBuilder ->
@@ -323,7 +320,7 @@ public class ComponentProvider {
         if (!plugin.config.useTagsIntegration) return text;
         try {
             for (TagResolverIntegration resolver : this.tagResolverIntegrationList) {
-                text = resolver.parseTags(text).replace("\\", "");
+                text = resolver.parseTags(text).replace("\\<", "<");
             }
         } catch (Exception e) {
             Bukkit.getLogger().warning("Error while parsing tags: " + e.getMessage());
@@ -367,13 +364,13 @@ public class ComponentProvider {
      */
     public @NotNull String parseLegacy(@NotNull String text, boolean parseAmpersand) {
 
-        text = miniMessage.serialize(BukkitComponentSerializer.legacy().deserialize(
+        text = miniMessage.serialize(LegacyComponentSerializer.legacySection().deserialize(
                 parseAmpersand ? replaceAmpersandCodesWithSection(text) : text
         ));
         if (plugin.config.debug) {
             Bukkit.getLogger().info("Parsed legacy: " + text);
         }
-        return text.replace("\\", "");
+        return text.replace("\\<", "<");
 
     }
 
@@ -424,7 +421,7 @@ public class ComponentProvider {
     @SuppressWarnings("ResultOfMethodCallIgnored")
     public void logComponent(Component component) {
         if (!plugin.config.chatLogging) {
-            bukkitAudiences.sender(plugin.getServer().getConsoleSender()).sendMessage(component);
+            plugin.getServer().getConsoleSender().sendMessage(component);
             return;
         }
 
@@ -475,14 +472,8 @@ public class ComponentProvider {
     }
 
     public void sendMessage(CommandSender sender, Component component) {
-        if (sender instanceof Player player)
-            bukkitAudiences.player(player).sendMessage(component);
-        else
-            bukkitAudiences.sender(sender).sendMessage(component);
+        sender.sendMessage(component);
     }
 
-    public void openBook(Player player, Book book) {
-        bukkitAudiences.player(player).openBook(book);
-    }
 }
 
